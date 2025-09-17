@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Capturar foto con getUserMedia</title>
+  <style>
+    :root { --bg:#0f172a; --card:#111827; --text:#e5e7eb; --muted:#9ca3af; --accent:#3b82f6; --ok:#10b981; --warn:#f59e0b; }
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu}
+    .wrap{max-width:1000px;margin:auto;padding:16px}
+    h1{font-size:1.25rem;margin:0 0 12px}
+    .grid{display:grid;gap:14px}
+    @media(min-width:900px){.grid{grid-template-columns:1.2fr .8fr}}
+    .card{background:var(--card);border:1px solid #1f2937;border-radius:18px;padding:14px;box-shadow:0 6px 20px rgba(0,0,0,.25)}
+    video, img, canvas{width:100%;border-radius:12px;background:#000;display:block}
+    .controls{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}
+    button, select, label{font:inherit}
+    button{border:1px solid #1f2937;background:#0b1220;color:var(--text);padding:10px 14px;border-radius:12px;cursor:pointer}
+    button:hover{border-color:#2a3a55}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    .primary{border-color:var(--accent)}
+    .success{border-color:var(--ok)}
+    .danger{border-color:#ef4444}
+    .note{color:var(--muted);font-size:.92rem}
+    .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px}
+    .pill{padding:6px 10px;border-radius:999px;background:#0b1220;border:1px solid #1f2937;color:var(--muted)}
+    a.download{display:inline-block;text-decoration:none}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>📷 Capturar foto con <code>navigator.mediaDevices.getUserMedia()</code></h1>
+
+    <div class="grid">
+      <!-- COLUMNA VIDEO -->
+      <section class="card">
+        <h2 style="margin:0 0 8px;font-size:1.1rem">Cámara (vista previa)</h2>
+        <video id="video" playsinline autoplay></video>
+
+        <div class="controls">
+          <button id="btnStart" class="primary">Iniciar cámara</button>
+          <button id="btnCapture" class="success" disabled>Tomar foto</button>
+          <button id="btnSwitch">Cambiar frontal/trasera</button>
+          <button id="btnStop" class="danger" disabled>Detener</button>
+        </div>
+
+        <div class="row">
+          <label class="pill">
+            <input type="checkbox" id="mirror" checked />
+            Espejar (selfie)
+          </label>
+          <span class="note">Sugerido “ON” para cámara frontal.</span>
+        </div>
+
+        <div class="row">
+          <label for="deviceSelect" class="pill">Elegir cámara:</label>
+          <select id="deviceSelect"></select>
+        </div>
+
+        <p class="note">
+          Consejo: funciona en <b>https</b> o <b>localhost</b>. En móviles iOS/Android debes
+          tocar “Iniciar cámara” (gesto del usuario) para que el video arranque.
+        </p>
+      </section>
+
+      <!-- COLUMNA FOTO -->
+      <section class="card">
+        <h2 style="margin:0 0 8px;font-size:1.1rem">Foto capturada</h2>
+        <img id="photo" alt="Aquí verás la foto capturada" />
+        <canvas id="canvas" style="display:none;"></canvas>
+
+        <div class="controls">
+          <a id="btnDownload" class="download" download="captura.jpg">
+            <button disabled>Descargar JPG</button>
+          </a>
+          <button id="btnNewShot" disabled>Tomar otra</button>
+        </div>
+
+        <details style="margin-top:8px">
+          <summary>Ver base64 (Data URL)</summary>
+          <textarea id="dataUrl" style="width:100%;height:140px;background:#0b1220;color:#cbd5e1;border:1px solid #1f2937;border-radius:10px;padding:8px"></textarea>
+        </details>
+      </section>
+    </div>
+
+    <p class="note" id="status" style="margin-top:12px"></p>
+  </div>
+
+  <script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const photo = document.getElementById('photo');
+    const statusEl = document.getElementById('status');
+    const deviceSelect = document.getElementById('deviceSelect');
+    const mirrorChk = document.getElementById('mirror');
+    const dataUrlTxt = document.getElementById('dataUrl');
+
+    const btnStart = document.getElementById('btnStart');
+    const btnCapture = document.getElementById('btnCapture');
+    const btnSwitch = document.getElementById('btnSwitch');
+    const btnStop = document.getElementById('btnStop');
+    const btnDownloadA = document.getElementById('btnDownload');
+    const btnDownload = btnDownloadA.querySelector('button');
+    const btnNewShot = document.getElementById('btnNewShot');
+
+    let currentStream = null;
+    let useFacingUser = false; // false = environment (trasera), true = user (frontal)
+
+    function setStatus(msg, kind="info"){
+      const emoji = kind==="error" ? "⚠️ " : kind==="ok" ? "✅ " : "ℹ️ ";
+      statusEl.textContent = emoji + msg;
+    }
+
+    function enableControls({started}){
+      btnCapture.disabled = !started;
+      btnStop.disabled = !started;
+      btnSwitch.disabled = !started;
+      btnStart.disabled = started;
+    }
+
+    function stopStream(){
+      if(currentStream){
+        currentStream.getTracks().forEach(t => t.stop());
+        currentStream = null;
+        video.srcObject = null;
+      }
+      enableControls({started:false});
+      setStatus("Cámara detenida.");
+    }
+
+    async function listVideoDevices(){
+      // Necesita permisos otorgados para ver labels
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cams = devices.filter(d => d.kind === 'videoinput');
+
+      deviceSelect.innerHTML = "";
+      cams.forEach((d, i) => {
+        const opt = document.createElement('option');
+        opt.value = d.deviceId;
+        opt.textContent = d.label || `Cámara ${i+1}`;
+        deviceSelect.appendChild(opt);
+      });
+
+      // Si hay más de una, mostramos el selector; si no, lo dejamos igual
+      deviceSelect.style.display = cams.length ? "inline-block" : "none";
+      return cams;
+    }
+
+    async function startCamera({deviceId=null, facingUser=null}={}){
+      try{
+        // Si pasaron facingUser directamente, actualizamos el flag
+        if(facingUser !== null) useFacingUser = !!facingUser;
+
+        // Si ya había stream, lo detenemos antes de cambiar
+        stopStream();
+
+        const constraints = {
+          audio: false,
+          video: deviceId ? { deviceId: { exact: deviceId } } : {
+            facingMode: useFacingUser ? 'user' : 'environment',
+            width: { ideal: 1280 }, height: { ideal: 720 }
+          }
+        };
+
+        setStatus("Solicitando acceso a la cámara…");
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        currentStream = stream;
+        video.srcObject = stream;
+        await video.play();
+
+        await listVideoDevices(); // repoblar con labels ahora visibles
+
+        // Si no se usó deviceId, intenta seleccionar en el <select> la cámara activa
+        const videoTrack = stream.getVideoTracks()[0];
+        const settings = videoTrack.getSettings();
+        if (settings && settings.deviceId) {
+          const opt = [...deviceSelect.options].find(o => o.value === settings.deviceId);
+          if (opt) deviceSelect.value = opt.value;
+        }
+
+        enableControls({started:true});
+        setStatus(`Cámara lista (${useFacingUser ? "frontal" : "trasera"}).`);
+      }catch(err){
+        let msg = "No se pudo acceder a la cámara.";
+        if (err.name === "NotAllowedError") msg = "Permiso denegado. Concede acceso a la cámara.";
+        else if (err.name === "NotFoundError" || err.name === "OverconstrainedError") msg = "No se encontró una cámara con esos parámetros.";
+        else if (err.name === "NotReadableError") msg = "Otra app está usando la cámara. Ciérrala e inténtalo de nuevo.";
+        setStatus(msg + ` (Detalle: ${err.name})`, "error");
+        enableControls({started:false});
+        console.error(err);
+      }
+    }
+
+    function capturePhoto(){
+      if(!currentStream || !video.videoWidth){
+        setStatus("La cámara aún no está lista.", "error");
+        return;
+      }
+      // Ajustar el canvas al tamaño real del frame
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d');
+
+      // Si espejamos, dibujamos volteado horizontalmente
+      if(mirrorChk.checked){
+        ctx.save();
+        ctx.scale(-1, 1);
+        ctx.drawImage(video, -canvas.width, 0, canvas.width, canvas.height);
+        ctx.restore();
+      }else{
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      }
+
+      // Convertir a JPG (calidad 0.92) y mostrar/descargar
+      const dataURL = canvas.toDataURL('image/jpeg', 0.92);
+      photo.src = dataURL;
+      dataUrlTxt.value = dataURL;
+
+      btnDownloadA.href = dataURL;
+      btnDownloadA.download = `captura-${Date.now()}.jpg`;
+      btnDownload.disabled = false;
+      btnNewShot.disabled = false;
+
+      setStatus("Foto capturada. Puedes descargarla o tomar otra.", "ok");
+    }
+
+    // --- Listeners ---
+    btnStart.addEventListener('click', () => startCamera({ facingUser:false }));
+    btnCapture.addEventListener('click', capturePhoto);
+    btnStop.addEventListener('click', stopStream);
+
+    btnSwitch.addEventListener('click', () => {
+      // Alternar frontal/trasera reiniciando el stream con facingMode
+      startCamera({ facingUser: !useFacingUser });
+    });
+
+    deviceSelect.addEventListener('change', () => {
+      const id = deviceSelect.value || null;
+      if(id) startCamera({ deviceId: id });
+    });
+
+    btnNewShot.addEventListener('click', () => {
+      // Simplemente limpia la imagen previa (la cámara sigue corriendo)
+      photo.removeAttribute('src');
+      dataUrlTxt.value = "";
+      btnDownload.disabled = true;
+      btnNewShot.disabled = true;
+      setStatus("Listo para una nueva captura.");
+    });
+
+    // Intento de precarga de lista de dispositivos (algunos navegadores piden permiso antes para mostrar labels)
+    if (navigator.mediaDevices?.enumerateDevices) {
+      listVideoDevices().catch(()=>{});
+    }
+  </script>
+</body>
+</html>
